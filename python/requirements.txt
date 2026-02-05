@@ -1,0 +1,17 @@
+# requirements.txt
+# Librerías necesarias para lectores de huella
+
+# Para ZKTeco
+pyzkfp==1.1.0
+pillow==10.2.0
+
+# Para comunicación USB genérica
+pyusb==1.2.1
+libusb==1.0.26
+
+# Para manejo de imágenes
+numpy==1.26.3
+
+# Para servidor HTTP
+flask==3.0.0
+flask-cors==4.0.0

@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <PlatformTarget>x86</PlatformTarget>
+    <RuntimeIdentifier>win-x86</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>false</PublishSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+    <RootNamespace>GymDesk.Fingerprint</RootNamespace>
+    <AssemblyName>GymDesk.Fingerprint</AssemblyName>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="8.0.0" />
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="6.5.0" />
+  </ItemGroup>
+
+  <!-- Referencia a la DLL manejada de ZKTeco -->
+  <ItemGroup>
+    <Reference Include="libzkfpcsharp">
+      <HintPath>SDK\libzkfpcsharp.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+  <!-- DLLs nativas que deben copiarse al output (mismo directorio del exe) -->
+  <ItemGroup>
+    <None Include="SDK\libzkfp.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>libzkfp.dll</Link>
+    </None>
+    <None Include="SDK\zkfinger10.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>zkfinger10.dll</Link>
+    </None>
+    <None Include="SDK\ZKFPCap.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>ZKFPCap.dll</Link>
+    </None>
+    <None Include="SDK\zkfpslibLow.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>zkfpslibLow.dll</Link>
+    </None>
+  </ItemGroup>
+
+</Project>
