@@ -12,6 +12,8 @@
     <RootNamespace>GymDesk.Fingerprint</RootNamespace>
     <AssemblyName>GymDesk.Fingerprint</AssemblyName>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <!-- Evitar que publish/, python/ y respaldos del SDK se arrastren al output -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);publish/**;python/**;SDK/_x64_backup/**;bin/**;obj/**</DefaultItemExcludes>
   </PropertyGroup>
 
   <ItemGroup>
@@ -26,23 +28,22 @@
     </Reference>
   </ItemGroup>
 
-  <!-- DLLs nativas que deben copiarse al output (mismo directorio del exe) -->
+  <!--
+    Runtime nativo de ZKTeco (todo x86) que debe ir junto al exe.
+    IMPORTANTE: ZKFPCap.dll carga los modulos de captura desde la subcarpeta
+    "ZKFPSensors" que este AL LADO de la propia ZKFPCap.dll; no busca en SysWOW64.
+    Sin esa carpeta el SDK nunca enumera el lector (GetDeviceCount = 0) aunque
+    Windows lo tenga instalado. Por eso se copian tambien los modulos y sus
+    dependencias (libusb0, fpslib, fppswsk12, libiomp5md, zkfinger10-32, ...).
+  -->
   <ItemGroup>
-    <None Include="SDK\libzkfp.dll">
+    <None Include="SDK\*.dll" Exclude="SDK\libzkfpcsharp.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <Link>libzkfp.dll</Link>
+      <Link>%(Filename)%(Extension)</Link>
     </None>
-    <None Include="SDK\zkfinger10.dll">
+    <None Include="SDK\ZKFPSensors\*.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <Link>zkfinger10.dll</Link>
-    </None>
-    <None Include="SDK\ZKFPCap.dll">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <Link>ZKFPCap.dll</Link>
-    </None>
-    <None Include="SDK\zkfpslibLow.dll">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <Link>zkfpslibLow.dll</Link>
+      <Link>ZKFPSensors\%(Filename)%(Extension)</Link>
     </None>
   </ItemGroup>
 
