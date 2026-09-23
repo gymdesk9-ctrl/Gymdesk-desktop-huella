@@ -460,6 +460,11 @@ public class DeviceStatus
     public int ImageWidth { get; set; }
     public int ImageHeight { get; set; }
     public bool IsReady { get; set; }
+    /// <summary>Modelo del lector activo ("ZKTeco ZK9500", "Hikvision DS-K1F820-F" o "Sin lector").</summary>
+    public string Model { get; set; } = "";
+    public string SerialNumber { get; set; } = "";
+    /// <summary>ZKTeco | Hikvision | Ninguno</summary>
+    public string Reader { get; set; } = "";
 }
 
 #endregion

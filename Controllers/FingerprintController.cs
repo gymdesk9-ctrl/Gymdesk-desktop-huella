@@ -4,22 +4,33 @@ using GymDesk.Fingerprint.Services;
 namespace GymDesk.Fingerprint.Controllers;
 
 /// <summary>
-/// API REST para lector de huellas ZKTeco ZK9500.
+/// API REST del lector de huellas USB (ZKTeco ZK9500 o Hikvision DS-K1F820-F).
 /// </summary>
 [ApiController]
 [Route("api/fingerprint")]
 public class FingerprintController : ControllerBase
 {
-    private readonly ZKFingerprintService _fingerprintService;
+    private readonly FingerprintManager _fingerprintService;
     private readonly ILogger<FingerprintController> _logger;
 
     public FingerprintController(
-        ZKFingerprintService fingerprintService,
+        FingerprintManager fingerprintService,
         ILogger<FingerprintController> logger)
     {
         _fingerprintService = fingerprintService;
         _logger = logger;
     }
+
+    private object DeviceInfo(DeviceStatus status) => new
+    {
+        model = status.Model,
+        reader = status.Reader,
+        serialNumber = status.SerialNumber,
+        sdkInitialized = status.SdkInitialized,
+        connected = status.DeviceConnected,
+        count = status.DeviceCount,
+        ready = status.IsReady
+    };
 
     /// <summary>
     /// Obtiene el estado del servicio y dispositivo.
@@ -33,16 +44,8 @@ public class FingerprintController : ControllerBase
         {
             success = true,
             service = "GymDesk Fingerprint Service",
-            version = "2.0.0",
-            device = new
-            {
-                model = "ZKTeco ZK9500",
-                serialNumber = "BXUC223460364",
-                sdkInitialized = status.SdkInitialized,
-                connected = status.DeviceConnected,
-                count = status.DeviceCount,
-                ready = status.IsReady
-            },
+            version = "2.1.0",
+            device = DeviceInfo(status),
             image = new
             {
                 width = status.ImageWidth,
@@ -52,13 +55,13 @@ public class FingerprintController : ControllerBase
     }
 
     /// <summary>
-    /// Inicializa/conecta el dispositivo ZKTeco.
+    /// Inicializa/conecta el lector (busca ZKTeco y luego Hikvision).
     /// </summary>
     [HttpPost("init")]
     [HttpPost("connect")]
     public IActionResult Initialize([FromQuery] int deviceIndex = 0)
     {
-        _logger.LogInformation("🔌 Conectando dispositivo ZK9500...");
+        _logger.LogInformation("🔌 Conectando lector de huella...");
 
         bool success = _fingerprintService.OpenDevice(deviceIndex);
         var status = _fingerprintService.GetStatus();
@@ -66,15 +69,10 @@ public class FingerprintController : ControllerBase
         return Ok(new
         {
             success,
-            message = success 
-                ? "Dispositivo ZK9500 conectado correctamente" 
-                : "Error al conectar dispositivo. Verifique la conexión USB.",
-            device = new
-            {
-                connected = status.DeviceConnected,
-                count = status.DeviceCount,
-                ready = status.IsReady
-            }
+            message = success
+                ? $"{status.Model} conectado correctamente"
+                : "No se detectó ningún lector de huella. Verifique la conexión USB.",
+            device = DeviceInfo(status)
         });
     }
 
@@ -85,7 +83,7 @@ public class FingerprintController : ControllerBase
     public IActionResult Disconnect()
     {
         _fingerprintService.CloseDevice();
-        
+
         return Ok(new
         {
             success = true,
@@ -100,7 +98,7 @@ public class FingerprintController : ControllerBase
     [HttpPost("refresh")]
     public IActionResult Reconnect()
     {
-        _logger.LogInformation("🔄 Reconectando dispositivo ZK9500...");
+        _logger.LogInformation("🔄 Reconectando lector de huella...");
 
         bool success = _fingerprintService.Reconnect();
         var status = _fingerprintService.GetStatus();
@@ -108,15 +106,10 @@ public class FingerprintController : ControllerBase
         return Ok(new
         {
             success,
-            message = success 
-                ? "Dispositivo ZK9500 reconectado correctamente" 
+            message = success
+                ? $"{status.Model} reconectado correctamente"
                 : "No se pudo reconectar. Verifique la conexión USB.",
-            device = new
-            {
-                connected = status.DeviceConnected,
-                count = status.DeviceCount,
-                ready = status.IsReady
-            }
+            device = DeviceInfo(status)
         });
     }
 
@@ -146,7 +139,7 @@ public class FingerprintController : ControllerBase
     }
 
     /// <summary>
-    /// Registra una huella (3 capturas + fusión).
+    /// Registra una huella (3 capturas).
     /// Usado para crear un template de alta calidad para almacenar.
     /// </summary>
     /// <param name="timeout">Tiempo de espera por captura en ms (default: 30000)</param>
@@ -161,8 +154,8 @@ public class FingerprintController : ControllerBase
         return Ok(new
         {
             success = result.Success,
-            message = result.Success 
-                ? "Huella registrada exitosamente (3 capturas fusionadas)" 
+            message = result.Success
+                ? "Huella registrada exitosamente (3 capturas)"
                 : result.ErrorMessage,
             template = result.TemplateBase64
         });
@@ -213,7 +206,7 @@ public class FingerprintController : ControllerBase
         {
             success = result.Success,
             message = result.Success
-                ? (result.IsMatch ? "Templates coinciden" : "Templates no coinciden")
+                ? (result.IsMatch ? "Templates coinciden" : (result.ErrorMessage ?? "Templates no coinciden"))
                 : result.ErrorMessage,
             match = result.IsMatch,
             score = result.Score
@@ -229,7 +222,7 @@ public class VerifyRequest
     /// Template almacenado en Base64.
     /// </summary>
     public string Template { get; set; } = "";
-    
+
     /// <summary>
     /// Timeout para la captura en milisegundos.
     /// </summary>
@@ -242,7 +235,7 @@ public class MatchRequest
     /// Primer template en Base64.
     /// </summary>
     public string Template1 { get; set; } = "";
-    
+
     /// <summary>
     /// Segundo template en Base64.
     /// </summary>

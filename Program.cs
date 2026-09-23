@@ -34,7 +34,8 @@ static void KillProcessOnPort(int port)
     }
 }
 
-const int port = 5051;
+// Puerto fijo 5051 (GymDesk lo espera ahí); GYMDESK_HUELLA_PUERTO solo sirve para probar una copia aparte
+int port = int.TryParse(Environment.GetEnvironmentVariable("GYMDESK_HUELLA_PUERTO"), out var puertoPrueba) ? puertoPrueba : 5051;
 if (IsPortInUse(port))
 {
     Console.WriteLine($"⚠️  Puerto {port} en uso. Intentando liberarlo...");
@@ -62,12 +63,14 @@ builder.Services.AddSwaggerGen(c =>
     { 
         Title = "GymDesk Fingerprint API", 
         Version = "v2.0",
-        Description = "API para lector de huellas ZKTeco ZK9500"
+        Description = "API para lector de huellas USB (ZKTeco ZK9500 / Hikvision DS-K1F820-F)"
     });
 });
 
 // Registrar servicio de huellas como Singleton
 builder.Services.AddSingleton<ZKFingerprintService>();
+builder.Services.AddSingleton<HikvisionFingerprintService>();
+builder.Services.AddSingleton<FingerprintManager>();
 
 // CORS
 builder.Services.AddCors(options =>
@@ -100,8 +103,7 @@ app.MapControllers();
 app.MapGet("/", () => new
 {
     service = "GymDesk Fingerprint Service",
-    device = "ZKTeco ZK9500",
-    serialNumber = "BXUC223460364",
+    device = "ZKTeco ZK9500 / Hikvision DS-K1F820-F",
     status = "running",
     version = "2.0.0",
     port = port,
@@ -124,23 +126,22 @@ Console.WriteLine();
 Console.WriteLine("╔═══════════════════════════════════════════════════════════╗");
 Console.WriteLine("║       GymDesk Fingerprint Service v2.0                    ║");
 Console.WriteLine("╠═══════════════════════════════════════════════════════════╣");
-Console.WriteLine("║  Dispositivo: ZKTeco ZK9500                               ║");
-Console.WriteLine("║  S/N: BXUC223460364                                       ║");
+Console.WriteLine("║  Lectores: ZKTeco ZK9500 / Hikvision DS-K1F820-F          ║");
 Console.WriteLine($"║  URL: http://localhost:{port}                              ║");
 Console.WriteLine("║  Swagger: http://localhost:5051/swagger                   ║");
 Console.WriteLine("╚═══════════════════════════════════════════════════════════╝");
 Console.WriteLine();
 
-// Inicializar el dispositivo ZKTeco automáticamente al arrancar
+// Buscar el lector de huella automáticamente al arrancar
 try
 {
-    var fingerprintService = app.Services.GetRequiredService<ZKFingerprintService>();
-    Console.WriteLine("🔌 Inicializando dispositivo ZKTeco ZK9500...");
-    
+    var fingerprintService = app.Services.GetRequiredService<FingerprintManager>();
+    Console.WriteLine("🔌 Buscando lector de huella USB (ZKTeco ZK9500 / Hikvision DS-K1F820-F)...");
+
     if (fingerprintService.OpenDevice())
     {
         var status = fingerprintService.GetStatus();
-        Console.WriteLine($"✅ Dispositivo conectado - Imagen: {status.ImageWidth}x{status.ImageHeight}px");
+        Console.WriteLine($"✅ {status.Model} conectado - Imagen: {status.ImageWidth}x{status.ImageHeight}px");
     }
     else
     {

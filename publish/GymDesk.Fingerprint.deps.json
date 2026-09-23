@@ -10,6 +10,7 @@
       "GymDesk.Fingerprint/1.0.0": {
         "dependencies": {
           "Microsoft.AspNetCore.OpenApi": "8.0.0",
+          "SourceAFIS": "3.14.0",
           "Swashbuckle.AspNetCore": "6.5.0",
           "libzkfpcsharp": "1.0.0.1",
           "runtimepack.Microsoft.NETCore.App.Runtime.win-x86": "8.0.23",
@@ -1308,6 +1309,14 @@
           }
         }
       },
+      "Dahomey.Cbor/1.16.1": {
+        "runtime": {
+          "lib/net6.0/Dahomey.Cbor.dll": {
+            "assemblyVersion": "1.16.1.0",
+            "fileVersion": "1.16.1.0"
+          }
+        }
+      },
       "Microsoft.AspNetCore.OpenApi/8.0.0": {
         "dependencies": {
           "Microsoft.OpenApi": "1.4.3"
@@ -1324,6 +1333,26 @@
           "lib/netstandard2.0/Microsoft.OpenApi.dll": {
             "assemblyVersion": "1.4.3.0",
             "fileVersion": "1.4.3.0"
+          }
+        }
+      },
+      "SixLabors.ImageSharp/2.1.3": {
+        "runtime": {
+          "lib/netcoreapp3.1/SixLabors.ImageSharp.dll": {
+            "assemblyVersion": "2.0.0.0",
+            "fileVersion": "2.1.3.0"
+          }
+        }
+      },
+      "SourceAFIS/3.14.0": {
+        "dependencies": {
+          "Dahomey.Cbor": "1.16.1",
+          "SixLabors.ImageSharp": "2.1.3"
+        },
+        "runtime": {
+          "lib/net5.0/SourceAFIS.dll": {
+            "assemblyVersion": "3.14.0.0",
+            "fileVersion": "3.14.0.0"
           }
         }
       },
@@ -1390,6 +1419,13 @@
       "serviceable": false,
       "sha512": ""
     },
+    "Dahomey.Cbor/1.16.1": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-NeFvt9CXi5Ew6ZnpjQsO4RoKfZiSZH3Ap7PCdqHryr/RL5WrrPl1+JbXny8ynNEmb6/1wDfT1F5I9fbPN6H84w==",
+      "path": "dahomey.cbor/1.16.1",
+      "hashPath": "dahomey.cbor.1.16.1.nupkg.sha512"
+    },
     "Microsoft.AspNetCore.OpenApi/8.0.0": {
       "type": "package",
       "serviceable": true,
@@ -1403,6 +1439,20 @@
       "sha512": "sha512-rURwggB+QZYcSVbDr7HSdhw/FELvMlriW10OeOzjPT7pstefMo7IThhtNtDudxbXhW+lj0NfX72Ka5EDsG8x6w==",
       "path": "microsoft.openapi/1.4.3",
       "hashPath": "microsoft.openapi.1.4.3.nupkg.sha512"
+    },
+    "SixLabors.ImageSharp/2.1.3": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-8yonNRWX3vUE9k29ta0Hbfa0AEc0hbDjSH/nZ3vOTJEXmY6hLnGsjDKoz96Z+AgOsrdkAu6PdL/Ebaf70aitzw==",
+      "path": "sixlabors.imagesharp/2.1.3",
+      "hashPath": "sixlabors.imagesharp.2.1.3.nupkg.sha512"
+    },
+    "SourceAFIS/3.14.0": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-TLTICwNMqBROeEAa4JNeY5eW3PyBawg6hrSqqEZ/45RtM0+e6oVHIzL4AYipF1SC2BlKh+ofhgxnuaDmPqMzuA==",
+      "path": "sourceafis/3.14.0",
+      "hashPath": "sourceafis.3.14.0.nupkg.sha512"
     },
     "Swashbuckle.AspNetCore/6.5.0": {
       "type": "package",
