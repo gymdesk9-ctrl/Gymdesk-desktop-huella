@@ -1,15 +1,18 @@
-using System.Runtime.InteropServices;
+using System.Management;
 using SourceAFIS;
 
 namespace GymDesk.Fingerprint.Services;
 
 /// <summary>
-/// Lector de huella Hikvision DS-K1F820-F por USB (USB SDK de Hikvision).
+/// Lector de huella Hikvision DS-K1F820-F por USB, con FPModule_SDK.dll (la misma DLL que usa iVMS-4200).
 ///
-/// El lector entrega la IMAGEN de la huella (256 x 360, 8 bits, 508 dpi). La plantilla y la comparación
+/// El lector entrega la IMAGEN de la huella (256 x 288, 8 bits, 508 dpi). La plantilla y la comparación
 /// las hace SourceAFIS en la PC, así el acceso por huella (1:N contra los socios) funciona igual que con
 /// el ZK9500. Las plantillas se guardan con el prefijo "SAFIS1:" + base64 para distinguirlas de las del
 /// ZKTeco (los dos formatos no son comparables entre sí).
+///
+/// El lector aparece en Windows como una unidad de CD-ROM (almacenamiento USB): es normal, no hace falta
+/// driver ni "expulsar" nada.
 /// </summary>
 public class HikvisionFingerprintService : IDisposable
 {
@@ -19,18 +22,22 @@ public class HikvisionFingerprintService : IDisposable
     /// <summary>Puntuación SourceAFIS a partir de la cual dos huellas son la misma (40 ≈ 0,01 % de falsos positivos).</summary>
     public const double MatchThreshold = 40;
 
-    private const int ImageWidth = 256;
-    private const int ImageHeight = 360;
     private const double ImageDpi = 508;
+
+    /// <summary>Sin dedo el sensor devuelve casi blanco (gris medio ≈ 252); con dedo baja claramente.</summary>
+    private const int GrisMaximoConDedo = 235;
 
     private readonly ILogger<HikvisionFingerprintService> _logger;
     private readonly object _sync = new();
 
-    private bool _sdkInitialized;
-    private int _userId = HikvisionUsbSdk.InvalidUserId;
-    private int _deviceCount;
+    private bool _dllDisponible = true;
+    private bool _abierto;
+    private string _sdkVersion = "";
     private string _serialNumber = "";
     private string _deviceName = "";
+    private string _unidad = "";
+    private int _imageWidth;
+    private int _imageHeight;
     private Task<CaptureResult>? _captureEnCurso;
 
     // Un FingerprintMatcher es caro de crear: se guarda el de la última huella consultada (identificación 1:N)
@@ -38,7 +45,7 @@ public class HikvisionFingerprintService : IDisposable
     private static string? _matcherKey;
     private static FingerprintMatcher? _matcher;
 
-    public bool IsReady => _userId != HikvisionUsbSdk.InvalidUserId;
+    public bool IsReady => _abierto;
     public string SerialNumber => _serialNumber;
     public string DeviceName => _deviceName;
 
@@ -47,154 +54,45 @@ public class HikvisionFingerprintService : IDisposable
         _logger = logger;
     }
 
-    #region Inicialización
-
-    public bool Initialize()
-    {
-        lock (_sync)
-        {
-            if (_sdkInitialized) return true;
-            try
-            {
-                if (!HikvisionUsbSdk.USB_SDK_Init())
-                {
-                    _logger.LogError("❌ USB_SDK_Init (Hikvision) falló: {Err}", HikvisionUsbSdk.LastError());
-                    return false;
-                }
-                _sdkInitialized = true;
-                // Los tamaños tienen que coincidir con HCUsbSDK.h (192/128/64/64/32/32/32); si no, el SDK leería basura
-                int[] tam = {
-                    Marshal.SizeOf<HikvisionUsbSdk.LoginInfo>(), Marshal.SizeOf<HikvisionUsbSdk.DeviceRegRes>(),
-                    Marshal.SizeOf<HikvisionUsbSdk.ConfigInput>(), Marshal.SizeOf<HikvisionUsbSdk.ConfigOutput>(),
-                    Marshal.SizeOf<HikvisionUsbSdk.FingerPrintOperParam>(), Marshal.SizeOf<HikvisionUsbSdk.FingerPrintCond>(),
-                    Marshal.SizeOf<HikvisionUsbSdk.FingerPrint>() };
-                int[] esperados = { 192, 128, 64, 64, 32, 32, 32 };
-                if (!tam.SequenceEqual(esperados))
-                {
-                    _logger.LogError("❌ Tamaños de estructuras del USB SDK incorrectos: {T} (esperado {E})", string.Join(",", tam), string.Join(",", esperados));
-                    return false;
-                }
-                uint v = HikvisionUsbSdk.USB_SDK_GetSDKVersion();
-                _logger.LogInformation("✅ USB SDK Hikvision inicializado (v{V})", $"{(v >> 24) & 0xff}.{(v >> 16) & 0xff}.{v & 0xffff}");
-                return true;
-            }
-            catch (DllNotFoundException ex)
-            {
-                _logger.LogWarning("⚠️ HCUsbSDK.dll no encontrada: {M}", ex.Message);
-                return false;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "❌ Excepción al inicializar el USB SDK de Hikvision");
-                return false;
-            }
-        }
-    }
-
-    /// <summary>Vendor ID USB de Hikvision Digital Technology.</summary>
-    private const uint HikvisionVid = 0x2BDF;
-
-    /// <summary>
-    /// El SDK enumera TODOS los dispositivos HID de la PC (teclado, touchpad...). Iniciar sesión en uno que no
-    /// sea de Hikvision hace que el SDK se caiga (y con él este servicio), así que solo se aceptan equipos
-    /// Hikvision o que se anuncien como lector de huella. GYMDESK_HIK_VID permite añadir otro VID (hex).
-    /// </summary>
-    private static bool EsLectorHikvision(HikvisionUsbSdk.DeviceInfo d)
-    {
-        if (d.dwVID == HikvisionVid) return true;
-        var extra = Environment.GetEnvironmentVariable("GYMDESK_HIK_VID");
-        if (!string.IsNullOrEmpty(extra) && uint.TryParse(extra.Replace("0x", ""), System.Globalization.NumberStyles.HexNumber, null, out var vid) && vid == d.dwVID) return true;
-        var texto = (HikvisionUsbSdk.Texto(d.szDeviceName) + " " + HikvisionUsbSdk.Texto(d.szManufacturer)).ToLowerInvariant();
-        return texto.Contains("hik") || texto.Contains("finger") || texto.Contains("k1f8") || texto.Contains("huella");
-    }
-
-    private List<HikvisionUsbSdk.DeviceInfo> Enumerar()
-    {
-        var lista = new List<HikvisionUsbSdk.DeviceInfo>();
-        HikvisionUsbSdk.EnumDeviceCallback cb = (ref HikvisionUsbSdk.DeviceInfo info, IntPtr _) => lista.Add(info);
-        bool ok = HikvisionUsbSdk.USB_SDK_EnumDevice(cb, IntPtr.Zero);
-        GC.KeepAlive(cb);
-        if (!ok) _logger.LogDebug("USB_SDK_EnumDevice devolvió false: {Err}", HikvisionUsbSdk.LastError());
-
-        // El SDK repite cada dispositivo por cada interfaz HID: quedarse con uno por VID/PID/serie
-        var unicos = lista.GroupBy(d => (d.dwVID, d.dwPID, HikvisionUsbSdk.Texto(d.szSerialNumber))).Select(g => g.First()).ToList();
-        foreach (var d in unicos)
-        {
-            _logger.LogInformation("🔎 USB HID: VID 0x{V:X4} PID 0x{P:X4} \"{N}\" ({F}) SN {S}{H}", d.dwVID, d.dwPID,
-                HikvisionUsbSdk.Texto(d.szDeviceName), HikvisionUsbSdk.Texto(d.szManufacturer), HikvisionUsbSdk.Texto(d.szSerialNumber),
-                EsLectorHikvision(d) ? " → lector Hikvision" : "");
-        }
-        return unicos.Where(EsLectorHikvision).ToList();
-    }
+    #region Conexión
 
     public bool OpenDevice()
     {
         lock (_sync)
         {
-            if (IsReady) return true;
-            if (!_sdkInitialized && !Initialize()) return false;
-
+            if (_abierto) return true;
+            if (!_dllDisponible) return false;
             try
             {
-                var dispositivos = Enumerar();
-                _deviceCount = dispositivos.Count;
-                if (dispositivos.Count == 0)
+                if (string.IsNullOrEmpty(_sdkVersion))
                 {
-                    _logger.LogDebug("No hay lector Hikvision conectado");
+                    var v = new byte[64];
+                    HikvisionFpModule.FPModule_GetSDKVersion(v);
+                    _sdkVersion = HikvisionFpModule.Texto(v);
+                    _logger.LogInformation("FPModule SDK (Hikvision): {V}", _sdkVersion);
+                }
+
+                int r = HikvisionFpModule.FPModule_OpenDevice();
+                if (r != 0)
+                {
+                    _logger.LogDebug("No hay lector Hikvision conectado (OpenDevice={R})", r);
                     return false;
                 }
-                // Si hay varios equipos Hikvision (por ejemplo un enrolador de tarjetas), preferir el de huella
-                var dev = dispositivos.FirstOrDefault(d =>
-                {
-                    var n = (HikvisionUsbSdk.Texto(d.szDeviceName) + " " + HikvisionUsbSdk.Texto(d.szManufacturer)).ToLowerInvariant();
-                    return n.Contains("finger") || n.Contains("k1f8") || n.Contains("huella");
-                });
-                if (dev.dwVID == 0 && dev.dwPID == 0) dev = dispositivos[0];
-                _logger.LogInformation("🔌 Conectando al lector Hikvision VID 0x{V:X4} PID 0x{P:X4}...", dev.dwVID, dev.dwPID);
-
-                // Las estaciones de Hikvision aceptan admin/12345 (usuario por defecto del SDK); si no, sin credenciales
-                foreach (var (usuario, clave) in new[] { ("admin", "12345"), ("", "") })
-                {
-                    var login = new HikvisionUsbSdk.LoginInfo
-                    {
-                        dwSize = (uint)Marshal.SizeOf<HikvisionUsbSdk.LoginInfo>(),
-                        dwTimeout = 5000,
-                        dwVID = dev.dwVID,
-                        dwPID = dev.dwPID,
-                        szUserName = HikvisionUsbSdk.Bytes(usuario, 32),
-                        szPassword = HikvisionUsbSdk.Bytes(clave, 16),
-                        szSerialNumber = dev.szSerialNumber ?? new byte[48],
-                        byRes = new byte[80],
-                    };
-                    var res = new HikvisionUsbSdk.DeviceRegRes
-                    {
-                        dwSize = (uint)Marshal.SizeOf<HikvisionUsbSdk.DeviceRegRes>(),
-                        szDeviceName = new byte[32], szSerialNumber = new byte[48], byRes = new byte[40],
-                    };
-                    int id = HikvisionUsbSdk.USB_SDK_Login(ref login, ref res);
-                    if (id == HikvisionUsbSdk.InvalidUserId)
-                    {
-                        _logger.LogWarning("⚠️ Login Hikvision ({U}) falló: {Err}", usuario == "" ? "sin usuario" : usuario, HikvisionUsbSdk.LastError());
-                        continue;
-                    }
-                    _userId = id;
-                    _deviceName = HikvisionUsbSdk.Texto(res.szDeviceName);
-                    _serialNumber = HikvisionUsbSdk.Texto(res.szSerialNumber);
-                    if (string.IsNullOrEmpty(_serialNumber)) _serialNumber = HikvisionUsbSdk.Texto(dev.szSerialNumber);
-                    _logger.LogInformation("✅ Lector Hikvision conectado: {N} SN {S} (fw {V})", _deviceName, _serialNumber,
-                        $"{res.dwSoftwareVersion >> 16}.{res.dwSoftwareVersion & 0xffff}");
-                    break;
-                }
-                if (!IsReady) return false;
-
-                // Pedimos IMAGEN (la comparación la hace la PC con SourceAFIS)
-                if (!ConfigurarCaptura())
-                {
-                    _logger.LogError("❌ No se pudo configurar la captura por imagen: {Err}", HikvisionUsbSdk.LastError());
-                    CloseDevice();
-                    return false;
-                }
+                var info = new byte[64];
+                HikvisionFpModule.FPModule_GetDeviceInfo(info);
+                _deviceName = HikvisionFpModule.Texto(info);
+                if (string.IsNullOrEmpty(_deviceName)) _deviceName = Model;
+                (_serialNumber, _unidad) = LeerSerieYUnidad();
+                _abierto = true;
+                _logger.LogInformation("✅ Lector Hikvision conectado: {N} SN {S}{U}", _deviceName, _serialNumber == "" ? "?" : _serialNumber,
+                    _unidad == "" ? "" : $" (unidad {_unidad})");
                 return true;
+            }
+            catch (DllNotFoundException ex)
+            {
+                _dllDisponible = false;
+                _logger.LogWarning("⚠️ FPModule_SDK.dll no encontrada; el lector Hikvision no estará disponible: {M}", ex.Message);
+                return false;
             }
             catch (Exception ex)
             {
@@ -204,45 +102,38 @@ public class HikvisionFingerprintService : IDisposable
         }
     }
 
-    private bool ConfigurarCaptura()
+    /// <summary>El lector es una unidad de CD-ROM USB: de ahí se sacan la letra y el número de serie (WMI).</summary>
+    private (string serie, string unidad) LeerSerieYUnidad()
     {
-        var param = new HikvisionUsbSdk.FingerPrintOperParam
-        {
-            dwSize = (uint)Marshal.SizeOf<HikvisionUsbSdk.FingerPrintOperParam>(),
-            byFPCompareType = 2,   // compara la plataforma
-            byFPCaptureType = 2,   // imagen
-            byFPCompareTimeout = 5,
-            byFPCompareMatchLevel = 3,
-            byRes = new byte[24],
-        };
-        IntPtr pParam = Marshal.AllocHGlobal(Marshal.SizeOf<HikvisionUsbSdk.FingerPrintOperParam>());
-        IntPtr pInput = Marshal.AllocHGlobal(Marshal.SizeOf<HikvisionUsbSdk.ConfigInput>());
         try
         {
-            Marshal.StructureToPtr(param, pParam, false);
-            var input = new HikvisionUsbSdk.ConfigInput
+            using var buscador = new ManagementObjectSearcher("SELECT Drive, Caption, PNPDeviceID FROM Win32_CDROMDrive");
+            foreach (ManagementObject d in buscador.Get())
             {
-                lpInBuffer = pParam,
-                dwInBufferSize = (uint)Marshal.SizeOf<HikvisionUsbSdk.FingerPrintOperParam>(),
-                byRes = new byte[48],
-            };
-            Marshal.StructureToPtr(input, pInput, false);
-            return HikvisionUsbSdk.USB_SDK_SetDeviceConfig(_userId, HikvisionUsbSdk.CmdSetFingerPrintOperParam, pInput, IntPtr.Zero);
+                string caption = d["Caption"]?.ToString() ?? "";
+                string pnp = d["PNPDeviceID"]?.ToString() ?? "";
+                if (!caption.Contains("K1F8", StringComparison.OrdinalIgnoreCase) && !pnp.Contains("K1F8", StringComparison.OrdinalIgnoreCase)) continue;
+                // USBSTOR\CDROM&VEN_&PROD_DS-K1F820-F&REV_0110\2027300413&0
+                string serie = pnp.Split('\\').LastOrDefault() ?? "";
+                int amp = serie.IndexOf('&');
+                if (amp > 0) serie = serie.Substring(0, amp);
+                return (serie, d["Drive"]?.ToString() ?? "");
+            }
         }
-        finally
+        catch (Exception ex)
         {
-            Marshal.FreeHGlobal(pParam);
-            Marshal.FreeHGlobal(pInput);
+            _logger.LogDebug("No se pudo leer la serie del lector por WMI: {M}", ex.Message);
         }
+        return ("", "");
     }
 
     public void CloseDevice()
     {
         lock (_sync)
         {
-            if (!IsReady) return;
-            try { HikvisionUsbSdk.USB_SDK_Logout(_userId); } catch { /* ya cerrado */ }
-            _userId = HikvisionUsbSdk.InvalidUserId;
+            if (!_abierto) return;
+            try { HikvisionFpModule.FPModule_CloseDevice(); } catch { /* ya cerrado */ }
+            _abierto = false;
             _logger.LogInformation("Lector Hikvision cerrado");
         }
     }
@@ -254,13 +145,21 @@ public class HikvisionFingerprintService : IDisposable
         return OpenDevice();
     }
 
+    /// <summary>Se llama cuando una función del SDK falla: el lector se desenchufó. La próxima llamada vuelve a buscarlo.</summary>
+    private void MarcarDesconectado(string motivo)
+    {
+        _logger.LogWarning("⚠️ Lector Hikvision desconectado ({M})", motivo);
+        try { HikvisionFpModule.FPModule_CloseDevice(); } catch { }
+        _abierto = false;
+    }
+
     #endregion
 
     #region Captura
 
     /// <summary>
-    /// Espera un dedo y devuelve la plantilla SourceAFIS. El lector espera de 10 a 60 s (mínimo del SDK);
-    /// si ya hay una captura en curso, la nueva llamada se suma a ella para no perder el dedo que se apoye.
+    /// Espera un dedo y devuelve la plantilla SourceAFIS. Si ya hay una captura en curso, la nueva llamada
+    /// se suma a ella para no perder el dedo que se apoye.
     /// </summary>
     public Task<CaptureResult> CaptureAsync(int timeoutMs = 10000)
     {
@@ -276,24 +175,24 @@ public class HikvisionFingerprintService : IDisposable
     {
         if (!IsReady && !OpenDevice()) return CaptureResult.Failure("Dispositivo no disponible");
 
-        int segundos = Math.Clamp((int)Math.Ceiling(timeoutMs / 1000.0), 10, 60);
-        _logger.LogInformation("👆 Esperando huella en Hikvision... (hasta {S}s)", segundos);
+        int ms = Math.Clamp(timeoutMs, 1000, 60000);
+        _logger.LogInformation("👆 Esperando huella en Hikvision... (hasta {S}s)", ms / 1000);
 
-        var imagen = CapturarImagen(segundos, out string? error);
+        var imagen = CapturarImagen(ms, out string? error, out int ancho, out int alto);
         if (imagen == null) return CaptureResult.Failure(error ?? "No se pudo capturar la huella");
 
         try
         {
-            var template = TemplateDesdeImagen(imagen);
+            var template = TemplateDesdeImagen(imagen, ancho, alto);
             var bytes = template.ToByteArray();
-            _logger.LogInformation("✅ Huella capturada (plantilla SourceAFIS de {N} bytes)", bytes.Length);
+            _logger.LogInformation("✅ Huella capturada ({W}x{H}, plantilla SourceAFIS de {N} bytes)", ancho, alto, bytes.Length);
             return new CaptureResult
             {
                 Success = true,
                 Template = bytes,
                 TemplateBase64 = Codificar(bytes),
-                ImageWidth = ImageWidth,
-                ImageHeight = ImageHeight,
+                ImageWidth = ancho,
+                ImageHeight = alto,
             };
         }
         catch (Exception ex)
@@ -303,95 +202,86 @@ public class HikvisionFingerprintService : IDisposable
         }
     }
 
-    /// <summary>Llama al SDK (bloquea hasta que hay dedo o vence la espera) y devuelve la imagen en bruto.</summary>
-    private byte[]? CapturarImagen(int segundos, out string? error)
+    /// <summary>
+    /// Espera a que haya un dedo (DetectFinger) y pide la imagen. Si la imagen sale casi blanca (el dedo
+    /// se levantó o apoyó muy poco) vuelve a intentarlo mientras quede tiempo.
+    /// </summary>
+    private byte[]? CapturarImagen(int timeoutMs, out string? error, out int ancho, out int alto)
     {
-        error = null;
+        error = null; ancho = 0; alto = 0;
         lock (_sync)
         {
-            if (!IsReady) { error = "Dispositivo no disponible"; return null; }
+            if (!_abierto) { error = "Dispositivo no disponible"; return null; }
 
-            int tamCond = Marshal.SizeOf<HikvisionUsbSdk.FingerPrintCond>();
-            int tamFp = Marshal.SizeOf<HikvisionUsbSdk.FingerPrint>();
-            IntPtr pCond = Marshal.AllocHGlobal(tamCond);
-            IntPtr pFp = Marshal.AllocHGlobal(tamFp);
-            IntPtr pInput = Marshal.AllocHGlobal(Marshal.SizeOf<HikvisionUsbSdk.ConfigInput>());
-            IntPtr pOutput = Marshal.AllocHGlobal(Marshal.SizeOf<HikvisionUsbSdk.ConfigOutput>());
-            IntPtr pBuffer = Marshal.AllocHGlobal(HikvisionUsbSdk.MaxFingerPrint);
-            try
+            var limite = DateTime.Now.AddMilliseconds(timeoutMs);
+            var buffer = new byte[1024 * 1024];
+            bool huboIntento = false;
+            while (DateTime.Now < limite)
             {
-                var cond = new HikvisionUsbSdk.FingerPrintCond { dwSize = (uint)tamCond, byWait = (byte)segundos, byRes = new byte[27] };
-                Marshal.StructureToPtr(cond, pCond, false);
-                var fp = new HikvisionUsbSdk.FingerPrint
+                int estado = 0;
+                int r = HikvisionFpModule.FPModule_DetectFinger(ref estado);
+                if (r != 0)
                 {
-                    dwSize = (uint)tamFp,
-                    dwFPSize = HikvisionUsbSdk.MaxFingerPrint,
-                    pFPBuffer = pBuffer,
-                    byRes = new byte[17],
-                };
-                Marshal.StructureToPtr(fp, pFp, false);
-                var input = new HikvisionUsbSdk.ConfigInput { lpInBuffer = pCond, dwInBufferSize = (uint)tamCond, byRes = new byte[48] };
-                Marshal.StructureToPtr(input, pInput, false);
-                var output = new HikvisionUsbSdk.ConfigOutput { lpOutBuffer = pFp, dwOutBufferSize = (uint)tamFp, byRes = new byte[56] };
-                Marshal.StructureToPtr(output, pOutput, false);
+                    MarcarDesconectado($"DetectFinger={r}");
+                    error = "Lector de huella desconectado";
+                    return null;
+                }
+                if (estado != 1) { Thread.Sleep(80); continue; }
 
-                if (!HikvisionUsbSdk.USB_SDK_GetDeviceConfig(_userId, HikvisionUsbSdk.CmdCaptureFingerPrint, pInput, pOutput))
+                int w = 0, h = 0;
+                r = HikvisionFpModule.FPModule_CaptureImage(buffer, ref w, ref h);
+                if (r != 0)
                 {
-                    uint code = HikvisionUsbSdk.USB_SDK_GetLastError();
-                    string err = HikvisionUsbSdk.LastError();
-                    if (code == HikvisionUsbSdk.ErrTimeout) { error = "Timeout esperando huella"; return null; }
-                    _logger.LogWarning("⚠️ Captura Hikvision falló: {Err}", err);
-                    if (code == HikvisionUsbSdk.ErrNoDevice || code == HikvisionUsbSdk.ErrDevNotReady || code >= 7 && code <= 9)
-                    {
-                        // El lector se desconectó: la próxima llamada vuelve a buscarlo
-                        try { HikvisionUsbSdk.USB_SDK_Logout(_userId); } catch { }
-                        _userId = HikvisionUsbSdk.InvalidUserId;
-                        error = "Lector de huella desconectado";
-                        return null;
-                    }
-                    error = "Error del lector: " + err;
+                    MarcarDesconectado($"CaptureImage={r}");
+                    error = "Lector de huella desconectado";
                     return null;
                 }
-
-                var salida = Marshal.PtrToStructure<HikvisionUsbSdk.FingerPrint>(pFp);
-                switch (salida.byResult)
+                if (w <= 0 || h <= 0 || w * h > buffer.Length)
                 {
-                    case 1: break;
-                    case 3: error = "Timeout esperando huella"; return null;
-                    case 4: error = "Huella de mala calidad; limpie el dedo y vuelva a intentarlo"; return null;
-                    default: error = "El lector no pudo capturar la huella"; return null;
-                }
-                if (salida.byFPType != 2)
-                {
-                    error = "El lector devolvió una plantilla en vez de la imagen";
-                    _logger.LogError("Captura Hikvision: byFPType={T}; se esperaba 2 (imagen). Revise byFPCompareType/byFPCaptureType", salida.byFPType);
+                    error = $"Imagen inválida ({w}x{h})";
                     return null;
                 }
-                int esperado = ImageWidth * ImageHeight;
-                int largo = salida.dwFPSize > 0 && salida.dwFPSize <= HikvisionUsbSdk.MaxFingerPrint ? (int)salida.dwFPSize : esperado;
-                if (largo < esperado)
+                huboIntento = true;
+                long suma = 0;
+                for (int i = 0; i < w * h; i++) suma += buffer[i];
+                int gris = (int)(suma / (w * h));
+                if (gris > GrisMaximoConDedo)
                 {
-                    error = $"Imagen incompleta ({largo} bytes)";
-                    return null;
+                    // Dedo apenas apoyado: esperar un poco y repetir
+                    _logger.LogDebug("Imagen casi vacía (gris {G}); reintentando", gris);
+                    Thread.Sleep(150);
+                    continue;
                 }
-                var imagen = new byte[esperado];
-                Marshal.Copy(pBuffer, imagen, 0, esperado);
+                _imageWidth = w; _imageHeight = h;
+                ancho = w; alto = h;
+                var imagen = new byte[w * h];
+                Array.Copy(buffer, imagen, w * h);
                 return imagen;
             }
-            finally
-            {
-                Marshal.FreeHGlobal(pCond);
-                Marshal.FreeHGlobal(pFp);
-                Marshal.FreeHGlobal(pInput);
-                Marshal.FreeHGlobal(pOutput);
-                Marshal.FreeHGlobal(pBuffer);
-            }
+            error = huboIntento ? "Huella de mala calidad; apoye bien el dedo y vuelva a intentarlo" : "Timeout esperando huella";
+            return null;
         }
     }
 
-    private static FingerprintTemplate TemplateDesdeImagen(byte[] pixeles)
+    /// <summary>Entre capturas del registro: espera a que se levante el dedo (para que sean apoyos distintos).</summary>
+    private void EsperarDedoFuera(int timeoutMs)
     {
-        var imagen = new FingerprintImage(ImageWidth, ImageHeight, pixeles, new FingerprintImageOptions { Dpi = ImageDpi });
+        var limite = DateTime.Now.AddMilliseconds(timeoutMs);
+        while (DateTime.Now < limite)
+        {
+            int estado = 0;
+            lock (_sync)
+            {
+                if (!_abierto || HikvisionFpModule.FPModule_DetectFinger(ref estado) != 0) return;
+            }
+            if (estado != 1) return;
+            Thread.Sleep(100);
+        }
+    }
+
+    private static FingerprintTemplate TemplateDesdeImagen(byte[] pixeles, int ancho, int alto)
+    {
+        var imagen = new FingerprintImage(ancho, alto, pixeles, new FingerprintImageOptions { Dpi = ImageDpi });
         return new FingerprintTemplate(imagen);
     }
 
@@ -425,7 +315,11 @@ public class HikvisionFingerprintService : IDisposable
                 if (score < MatchThreshold) return EnrollResult.Failure("Las capturas no coinciden. Use el mismo dedo.");
             }
             _logger.LogInformation("  ✅ Captura {C}/{T} OK", i + 1, capturas);
-            if (i < capturas - 1) await Task.Delay(500);
+            if (i < capturas - 1)
+            {
+                await Task.Run(() => EsperarDedoFuera(3000));
+                await Task.Delay(300);
+            }
         }
 
         int mejor = 0; double mejorSuma = -1;
@@ -498,22 +392,17 @@ public class HikvisionFingerprintService : IDisposable
 
     public DeviceStatus GetStatus() => new()
     {
-        SdkInitialized = _sdkInitialized,
+        SdkInitialized = _dllDisponible,
         DeviceConnected = IsReady,
-        DeviceCount = IsReady ? Math.Max(1, _deviceCount) : _deviceCount,
-        ImageWidth = IsReady ? ImageWidth : 0,
-        ImageHeight = IsReady ? ImageHeight : 0,
+        DeviceCount = IsReady ? 1 : 0,
+        ImageWidth = IsReady ? (_imageWidth > 0 ? _imageWidth : 256) : 0,
+        ImageHeight = IsReady ? (_imageHeight > 0 ? _imageHeight : 288) : 0,
         IsReady = IsReady,
     };
 
     public void Dispose()
     {
         CloseDevice();
-        if (_sdkInitialized)
-        {
-            try { HikvisionUsbSdk.USB_SDK_Cleanup(); } catch { }
-            _sdkInitialized = false;
-        }
         GC.SuppressFinalize(this);
     }
 }
