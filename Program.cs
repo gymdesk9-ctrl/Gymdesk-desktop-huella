@@ -136,17 +136,12 @@ Console.WriteLine();
 try
 {
     var fingerprintService = app.Services.GetRequiredService<FingerprintManager>();
-    Console.WriteLine("🔌 Buscando lector de huella USB (ZKTeco ZK9500 / Hikvision DS-K1F820-F)...");
-
-    if (fingerprintService.OpenDevice())
-    {
-        var status = fingerprintService.GetStatus();
-        Console.WriteLine($"✅ {status.Model} conectado - Imagen: {status.ImageWidth}x{status.ImageHeight}px");
-    }
-    else
-    {
-        Console.WriteLine("⚠️  No se detectó lector USB. Conecte el dispositivo y llame a /api/fingerprint/connect");
-    }
+    // Al arrancar NO se toma el lector: se usa solo al capturar una huella y se suelta enseguida,
+    // para que otros programas del gimnasio puedan usar el mismo lector con GymDesk abierto.
+    var status = fingerprintService.GetStatus();
+    Console.WriteLine(status.DeviceConnected
+        ? $"✅ {status.Model} detectado. Se usará solo al capturar una huella (queda libre para otros programas)."
+        : "⚠️  No se detectó lector USB. Conéctelo cuando lo necesite.");
 }
 catch (Exception ex)
 {

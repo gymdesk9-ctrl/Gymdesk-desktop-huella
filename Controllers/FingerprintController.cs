@@ -119,11 +119,12 @@ public class FingerprintController : ControllerBase
     /// <param name="timeout">Tiempo de espera en milisegundos (default: 10000)</param>
     [HttpPost("capture")]
     [HttpGet("capture")]
-    public async Task<IActionResult> Capture([FromQuery] int timeout = 10000)
+    public async Task<IActionResult> Capture([FromQuery] int timeout = 10000, [FromQuery] bool ceder = false)
     {
-        _logger.LogInformation("👆 Capturando huella...");
+        if (!ceder) _logger.LogInformation("👆 Capturando huella...");
 
-        var result = await _fingerprintService.CaptureAsync(timeout);
+        // ceder=true: el monitor de accesos suelta el lector si el usuario pasa a otro programa que lo usa
+        var result = await _fingerprintService.CaptureAsync(timeout, ceder);
 
         return Ok(new
         {

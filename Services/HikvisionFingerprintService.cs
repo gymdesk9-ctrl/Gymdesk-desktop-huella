@@ -161,24 +161,24 @@ public class HikvisionFingerprintService : IDisposable
     /// Espera un dedo y devuelve la plantilla SourceAFIS. Si ya hay una captura en curso, la nueva llamada
     /// se suma a ella para no perder el dedo que se apoye.
     /// </summary>
-    public Task<CaptureResult> CaptureAsync(int timeoutMs = 10000)
+    public Task<CaptureResult> CaptureAsync(int timeoutMs = 10000, CancellationToken cancelar = default)
     {
         lock (_sync)
         {
             if (_captureEnCurso != null && !_captureEnCurso.IsCompleted) return _captureEnCurso;
-            _captureEnCurso = Task.Run(() => CapturarBloqueante(timeoutMs));
+            _captureEnCurso = Task.Run(() => CapturarBloqueante(timeoutMs, cancelar));
             return _captureEnCurso;
         }
     }
 
-    private CaptureResult CapturarBloqueante(int timeoutMs)
+    private CaptureResult CapturarBloqueante(int timeoutMs, CancellationToken cancelar = default)
     {
         if (!IsReady && !OpenDevice()) return CaptureResult.Failure("Dispositivo no disponible");
 
         int ms = Math.Clamp(timeoutMs, 1000, 60000);
         _logger.LogInformation("👆 Esperando huella en Hikvision... (hasta {S}s)", ms / 1000);
 
-        var imagen = CapturarImagen(ms, out string? error, out int ancho, out int alto);
+        var imagen = CapturarImagen(ms, out string? error, out int ancho, out int alto, cancelar);
         if (imagen == null) return CaptureResult.Failure(error ?? "No se pudo capturar la huella");
 
         try
@@ -206,7 +206,7 @@ public class HikvisionFingerprintService : IDisposable
     /// Espera a que haya un dedo (DetectFinger) y pide la imagen. Si la imagen sale casi blanca (el dedo
     /// se levantó o apoyó muy poco) vuelve a intentarlo mientras quede tiempo.
     /// </summary>
-    private byte[]? CapturarImagen(int timeoutMs, out string? error, out int ancho, out int alto)
+    private byte[]? CapturarImagen(int timeoutMs, out string? error, out int ancho, out int alto, CancellationToken cancelar = default)
     {
         error = null; ancho = 0; alto = 0;
         lock (_sync)
@@ -218,6 +218,8 @@ public class HikvisionFingerprintService : IDisposable
             bool huboIntento = false;
             while (DateTime.Now < limite)
             {
+                if (cancelar.IsCancellationRequested) { error = "Captura cancelada"; return null; }
+
                 int estado = 0;
                 int r = HikvisionFpModule.FPModule_DetectFinger(ref estado);
                 if (r != 0)

@@ -20,6 +20,8 @@ public class ZKFingerprintService : IDisposable
     private byte[]? _imageBuffer;
 
     public bool IsReady => _sdkInitialized && _deviceHandle != IntPtr.Zero;
+    /// <summary>El SDK está iniciado (aunque el lector no esté abierto).</summary>
+    public bool SdkActivo => _sdkInitialized;
     public int ImageWidth => _imageWidth;
     public int ImageHeight => _imageHeight;
 
@@ -105,12 +107,8 @@ public class ZKFingerprintService : IDisposable
                 _imageBuffer = new byte[_imageWidth * _imageHeight];
                 _logger.LogInformation("📐 Imagen: {W}x{H}", _imageWidth, _imageHeight);
 
-                // Inicializar DB para matching
-                _dbHandle = zkfp2.DBInit();
-                if (_dbHandle != IntPtr.Zero)
-                {
-                    _logger.LogInformation("✅ Base de datos inicializada");
-                }
+                // Base para comparar plantillas (no depende del lector)
+                AsegurarDb();
 
                 return true;
             }
@@ -122,16 +120,43 @@ public class ZKFingerprintService : IDisposable
         }
     }
 
+    /// <summary>SDK y base de comparación listos, SIN abrir el lector (comparar plantillas no necesita el aparato).</summary>
+    public bool AsegurarDb()
+    {
+        lock (_lock)
+        {
+            if (!_sdkInitialized && !Initialize()) return false;
+            if (_dbHandle == IntPtr.Zero)
+            {
+                try { _dbHandle = zkfp2.DBInit(); } catch (Exception ex) { _logger.LogError(ex, "❌ No se pudo crear la base de comparación"); }
+            }
+            return _dbHandle != IntPtr.Zero;
+        }
+    }
+
+    /// <summary>Suelta el lector, la base y el SDK: el aparato queda libre para otros programas.</summary>
+    public void LiberarTodo()
+    {
+        lock (_lock)
+        {
+            CloseDevice();
+            if (_dbHandle != IntPtr.Zero)
+            {
+                try { zkfp2.DBFree(_dbHandle); } catch { }
+                _dbHandle = IntPtr.Zero;
+            }
+            if (_sdkInitialized)
+            {
+                try { zkfp2.Terminate(); } catch { }
+                _sdkInitialized = false;
+            }
+        }
+    }
+
     public void CloseDevice()
     {
         lock (_lock)
         {
-            if (_dbHandle != IntPtr.Zero)
-            {
-                zkfp2.DBFree(_dbHandle);
-                _dbHandle = IntPtr.Zero;
-            }
-
             if (_deviceHandle != IntPtr.Zero)
             {
                 zkfp2.CloseDevice(_deviceHandle);
@@ -145,7 +170,7 @@ public class ZKFingerprintService : IDisposable
 
     #region Captura
 
-    public async Task<CaptureResult> CaptureAsync(int timeoutMs = 10000)
+    public async Task<CaptureResult> CaptureAsync(int timeoutMs = 10000, CancellationToken cancelar = default)
     {
         if (!IsReady && !OpenDevice())
         {
@@ -165,6 +190,8 @@ public class ZKFingerprintService : IDisposable
 
                 while ((DateTime.Now - start).TotalMilliseconds < timeoutMs)
                 {
+                    if (cancelar.IsCancellationRequested) return CaptureResult.Failure("Captura cancelada");
+
                     int ret = zkfp2.AcquireFingerprint(_deviceHandle, _imageBuffer, template, ref templateSize);
 
                     if (ret == zkfp.ZKFP_ERR_OK)
@@ -316,7 +343,8 @@ public class ZKFingerprintService : IDisposable
 
     public MatchResult MatchTemplates(string template1Base64, string template2Base64)
     {
-        if (!IsReady && !OpenDevice())
+        // Comparar dos plantillas guardadas no necesita el lector: no se abre (queda libre para otros programas)
+        if (!AsegurarDb())
         {
             return new MatchResult { Success = false, ErrorMessage = "Dispositivo no disponible" };
         }
@@ -329,7 +357,13 @@ public class ZKFingerprintService : IDisposable
             return new MatchResult { Success = false, ErrorMessage = "Template(s) inválido(s)" };
         }
 
-        int score = zkfp2.DBMatch(_dbHandle, t1, t2);
+        int score;
+        lock (_lock)
+        {
+            // Dentro del candado: la base no se puede liberar a mitad de la comparación
+            if (!AsegurarDb()) return new MatchResult { Success = false, ErrorMessage = "Dispositivo no disponible" };
+            score = zkfp2.DBMatch(_dbHandle, t1, t2);
+        }
 
         return new MatchResult
         {
@@ -397,13 +431,7 @@ public class ZKFingerprintService : IDisposable
 
     public void Dispose()
     {
-        CloseDevice();
-
-        if (_sdkInitialized)
-        {
-            zkfp2.Terminate();
-            _sdkInitialized = false;
-        }
+        LiberarTodo();
 
         GC.SuppressFinalize(this);
     }
