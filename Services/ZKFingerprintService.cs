@@ -32,22 +32,35 @@ public class ZKFingerprintService : IDisposable
 
     #region Inicialización
 
+    // Si el SDK no inicia (sin lector o sin driver), no se reintenta en cada captura del monitor (cada 2 s):
+    // se espera medio minuto entre intentos y se avisa una sola vez por ciclo, para no llenar el registro.
+    private DateTime _ultimoFalloInit = DateTime.MinValue;
+    private bool _falloInitAvisado = false;
+    private static readonly TimeSpan EsperaTrasFallo = TimeSpan.FromSeconds(30);
+
     public bool Initialize()
     {
         lock (_lock)
         {
             if (_sdkInitialized) return true;
+            if (DateTime.UtcNow - _ultimoFalloInit < EsperaTrasFallo) return false;
 
             try
             {
-                _logger.LogInformation("🔧 Inicializando ZKTeco SDK...");
+                if (!_falloInitAvisado) _logger.LogInformation("🔧 Inicializando ZKTeco SDK...");
 
                 int ret = zkfp2.Init();
                 if (ret != zkfperrdef.ZKFP_ERR_OK)
                 {
-                    _logger.LogError("❌ Error al inicializar SDK: código {Code}", ret);
+                    _ultimoFalloInit = DateTime.UtcNow;
+                    if (!_falloInitAvisado)
+                    {
+                        _logger.LogWarning("⚠️ No se pudo iniciar el SDK ZKTeco (código {Code}): ¿lector conectado y driver instalado? Se reintenta cada 30 s.", ret);
+                        _falloInitAvisado = true;
+                    }
                     return false;
                 }
+                _falloInitAvisado = false;
 
                 _sdkInitialized = true;
 
@@ -58,6 +71,7 @@ public class ZKFingerprintService : IDisposable
             }
             catch (Exception ex)
             {
+                _ultimoFalloInit = DateTime.UtcNow;
                 _logger.LogError(ex, "❌ Excepción al inicializar SDK");
                 return false;
             }
