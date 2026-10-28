@@ -22,6 +22,24 @@ public class FingerprintManager : IDisposable
     private readonly HikvisionFingerprintService _hik;
     private readonly ILogger<FingerprintManager> _logger;
     private readonly object _sync = new();
+    // El monitor de accesos espera dedos sin parar (captura "ceder"). Cuando un formulario captura o enrola una huella,
+    // esa espera se corta y no se vuelve a admitir hasta que el formulario termine: si no, el dedo del que se está
+    // registrando se lo lleva el monitor y suena "no reconocido".
+    private CancellationTokenSource? _corteMonitor;
+    private Task<CaptureResult>? _capturaMonitor;
+    private int _directas;
+    // Al terminar una captura o registro de un formulario, el dedo sigue apoyado un momento: el monitor no vuelve a
+    // leer hasta pasado este plazo, o tomaría ese mismo dedo como un intento de acceso ("no reconocido" + pitido)
+    private DateTime _monitorBloqueadoHasta = DateTime.MinValue;
+    private const int BLOQUEO_TRAS_DIRECTA_MS = 3000;
+
+    /// <summary>Corta la espera del monitor y aguarda a que suelte el lector (como mucho medio segundo).</summary>
+    private async Task SoltarMonitor()
+    {
+        try { _corteMonitor?.Cancel(); } catch { }
+        var t = _capturaMonitor;
+        if (t != null && !t.IsCompleted) { try { await Task.WhenAny(t, Task.Delay(500)); } catch { } }
+    }
     private DateTime _ultimoIntento = DateTime.MinValue;
 
     /// <summary>Segundos sin uso tras los que se suelta el lector.</summary>
@@ -210,7 +228,16 @@ public class FingerprintManager : IDisposable
     /// </summary>
     public async Task<CaptureResult> CaptureAsync(int timeoutMs, bool ceder = false)
     {
-        if (!ceder) return await Capturar(timeoutMs, default);
+        if (!ceder)
+        {
+            Interlocked.Increment(ref _directas);
+            await SoltarMonitor();
+            try { return await Capturar(timeoutMs, default); }
+            finally { _monitorBloqueadoHasta = DateTime.UtcNow.AddMilliseconds(BLOQUEO_TRAS_DIRECTA_MS); Interlocked.Decrement(ref _directas); }
+        }
+
+        if (Volatile.Read(ref _directas) > 0 || DateTime.UtcNow < _monitorBloqueadoHasta)
+            return CaptureResult.Failure("Lector en uso por otro programa: GymDesk está registrando una huella");
 
         if (ProgramaEnPrimerPlano.UsaLectorDeHuella(out string delante))
         {
@@ -229,9 +256,14 @@ public class FingerprintManager : IDisposable
             }
         });
 
-        var resultado = await Capturar(timeoutMs, corte.Token);
+        _corteMonitor = corte;
+        CaptureResult resultado;
+        try { var tarea = Capturar(timeoutMs, corte.Token); _capturaMonitor = tarea; resultado = await tarea; }
+        finally { _corteMonitor = null; _capturaMonitor = null; }
         corte.Cancel();
         await vigia;
+        if (!resultado.Success && cedidoA.Length == 0 && Volatile.Read(ref _directas) > 0)
+            return CaptureResult.Failure("Lector en uso por otro programa: GymDesk está registrando una huella");
 
         if (!resultado.Success && cedidoA.Length > 0)
         {
@@ -242,8 +274,14 @@ public class FingerprintManager : IDisposable
         return resultado;
     }
 
-    public Task<EnrollResult> EnrollAsync(int timeoutMs) =>
-        Usar(() => Activo == LectorHuella.Hikvision ? _hik.EnrollAsync(timeoutMs) : _zk.EnrollAsync(timeoutMs), EnrollResult.Failure);
+    public async Task<EnrollResult> EnrollAsync(int timeoutMs)
+    {
+        // Enrolar desde un formulario: el monitor suelta el lector mientras tanto (ver _directas)
+        Interlocked.Increment(ref _directas);
+        await SoltarMonitor();
+        try { return await Usar(() => Activo == LectorHuella.Hikvision ? _hik.EnrollAsync(timeoutMs) : _zk.EnrollAsync(timeoutMs), EnrollResult.Failure); }
+        finally { _monitorBloqueadoHasta = DateTime.UtcNow.AddMilliseconds(BLOQUEO_TRAS_DIRECTA_MS); Interlocked.Decrement(ref _directas); }
+    }
 
     public Task<VerifyResult> VerifyAsync(string template, int timeoutMs) =>
         Usar(() =>
