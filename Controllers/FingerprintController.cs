@@ -213,9 +213,55 @@ public class FingerprintController : ControllerBase
             score = result.Score
         });
     }
+
+    /// <summary>
+    /// Compara una plantilla contra muchas en una sola llamada y devuelve la primera que coincide (¿esta huella ya es
+    /// de otra persona?). Antes el servidor hacía una petición por cada huella registrada: con muchos socios, guardar
+    /// una huella tardaba varios segundos.
+    /// </summary>
+    [HttpPost("match-many")]
+    public IActionResult MatchMany([FromBody] MatchManyRequest request)
+    {
+        if (string.IsNullOrEmpty(request.Template))
+        {
+            return BadRequest(new { success = false, message = "Se requiere el template" });
+        }
+
+        var reloj = System.Diagnostics.Stopwatch.StartNew();
+        int comparadas = 0;
+        foreach (var otra in request.Templates ?? new List<MatchManyItem>())
+        {
+            if (string.IsNullOrEmpty(otra.Template)) continue;
+            comparadas++;
+            var r = _fingerprintService.MatchTemplates(request.Template, otra.Template);
+            if (r.Success && r.IsMatch && r.Score > 0)
+            {
+                _logger.LogInformation("Huella repetida: {N} comparada(s) en {Ms} ms, coincide con {Id}", comparadas, reloj.ElapsedMilliseconds, otra.Id);
+                return Ok(new { success = true, match = true, id = otra.Id, score = r.Score, compared = comparadas });
+            }
+        }
+        _logger.LogInformation("Huella repetida: {N} comparada(s) en {Ms} ms, sin coincidencia", comparadas, reloj.ElapsedMilliseconds);
+        return Ok(new { success = true, match = false, id = (string?)null, score = 0, compared = comparadas });
+    }
 }
 
 #region Request DTOs
+
+public class MatchManyItem
+{
+    public string Id { get; set; } = "";
+    public string Template { get; set; } = "";
+}
+
+public class MatchManyRequest
+{
+    /// <summary>Template nuevo en Base64.</summary>
+    public string Template { get; set; } = "";
+
+    /// <summary>Templates guardados contra los que se compara.</summary>
+    public List<MatchManyItem>? Templates { get; set; }
+}
+
 
 public class VerifyRequest
 {
